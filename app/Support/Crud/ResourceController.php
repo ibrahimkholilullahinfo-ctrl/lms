@@ -11,25 +11,24 @@ use Illuminate\Support\Str;
 use Illuminate\View\View;
 
 /**
- * Small schema driven CRUD engine.
+ * Schema driven CRUD engine.
  *
- * Each admin resource declares its fields once; index tables, create/edit
- * forms and validation are generated from that single definition. Custom
- * behaviour is added by overriding individual hooks.
+ * Every resource declares its fields once; the listing table, create/edit
+ * forms, validation and persistence are derived from that definition.
+ * Tenant isolation comes from the model global scope, so a record from
+ * another institute resolves to 404.
  */
 abstract class ResourceController extends \App\Http\Controllers\Controller
 {
     /** @var class-string<Model> */
     protected string $model;
 
-    /** Route name prefix, e.g. "admin.courses". */
     protected string $route;
 
     protected string $title;
 
     protected string $description = '';
 
-    /** Relations eager loaded for the listing. */
     protected array $with = [];
 
     protected array $searchable = [];
@@ -46,18 +45,10 @@ abstract class ResourceController extends \App\Http\Controllers\Controller
 
     protected bool $allowDelete = true;
 
-    /**
-     * Field definitions.
-     *
-     * @return array<int, array<string, mixed>>
-     */
+    /** @return array<int, array<string, mixed>> */
     abstract public function fields(?Model $record = null): array;
 
-    /**
-     * Table column definitions.
-     *
-     * @return array<int, array<string, mixed>>
-     */
+    /** @return array<int, array<string, mixed>> */
     public function columns(): array
     {
         return collect($this->fields())
@@ -78,10 +69,21 @@ abstract class ResourceController extends \App\Http\Controllers\Controller
         return $this->model::query()->with($this->with);
     }
 
+    /** Extra where clauses from the query string. @return array<string, mixed> */
+    protected function filters(Request $request): array
+    {
+        return [];
+    }
+
+    /** Additional per-row actions: [['label'=>, 'icon'=>, 'url'=>, 'class'=>]]. */
+    protected function rowActions(Model $record): array
+    {
+        return [];
+    }
+
     public function index(Request $request): View
     {
         $query = $this->baseQuery();
-
         $search = trim((string) $request->query('q', ''));
 
         if ($search !== '' && $this->searchable !== []) {
@@ -110,18 +112,13 @@ abstract class ResourceController extends \App\Http\Controllers\Controller
             'search' => $search,
             'allowCreate' => $this->allowCreate,
             'allowDelete' => $this->allowDelete,
-            'extraActions' => $this->indexActions(),
+            'filters' => $this->filterOptions($request),
+            'rowActions' => fn (Model $record) => $this->rowActions($record),
         ]);
     }
 
-    /** Extra filters accepted from the query string. */
-    protected function filters(Request $request): array
-    {
-        return [];
-    }
-
-    /** Additional row actions: name => ['label' => '', 'icon' => '', 'class' => ''] */
-    protected function indexActions(): array
+    /** @return array<int, array<string, mixed>> */
+    protected function filterOptions(Request $request): array
     {
         return [];
     }
@@ -134,6 +131,7 @@ abstract class ResourceController extends \App\Http\Controllers\Controller
 
         return view("{$this->viewPrefix}.form", [
             'title' => $this->title,
+            'description' => $this->description,
             'route' => $this->route,
             'record' => $record,
             'fields' => $this->fields($record),
@@ -152,46 +150,58 @@ abstract class ResourceController extends \App\Http\Controllers\Controller
         $record->save();
         $this->afterSave($record, $request);
 
-        ActivityLog::record('created', $record, __('Created :name', ['name' => $this->title]).': '.$this->labelFor($record));
+        ActivityLog::record('created', $record, __('Created :name', ['name' => __($this->title)]).': '.$this->labelFor($record));
 
         return redirect()->route("{$this->route}.index")
-            ->with('success', __(':name has been created.', ['name' => $this->title]));
+            ->with('success', __(':name has been created.', ['name' => __($this->title)]));
     }
 
-    public function edit(Model $record): View
+    public function edit(string $record): View
     {
+        $model = $this->findRecord($record);
+
         return view("{$this->viewPrefix}.form", [
             'title' => $this->title,
+            'description' => $this->description,
             'route' => $this->route,
-            'record' => $record,
-            'fields' => $this->fields($record),
-            'action' => route("{$this->route}.update", $record),
+            'record' => $model,
+            'fields' => $this->fields($model),
+            'action' => route("{$this->route}.update", $model),
             'method' => 'PUT',
         ]);
     }
 
-    public function update(Request $request, Model $record): RedirectResponse
+    public function update(Request $request, string $record): RedirectResponse
     {
-        $data = $this->validated($request, $record);
-        $this->fill($record, $data);
-        $record->save();
-        $this->afterSave($record, $request);
+        $model = $this->findRecord($record);
+        $data = $this->validated($request, $model);
+        $this->fill($model, $data);
+        $model->save();
+        $this->afterSave($model, $request);
 
-        ActivityLog::record('updated', $record, __('Updated :name', ['name' => $this->title]).': '.$this->labelFor($record));
+        ActivityLog::record('updated', $model, __('Updated :name', ['name' => __($this->title)]).': '.$this->labelFor($model));
 
         return redirect()->route("{$this->route}.index")
-            ->with('success', __(':name has been updated.', ['name' => $this->title]));
+            ->with('success', __(':name has been updated.', ['name' => __($this->title)]));
     }
 
-    public function destroy(Model $record): RedirectResponse
+    public function destroy(string $record): RedirectResponse
     {
         abort_unless($this->allowDelete, 403);
 
-        ActivityLog::record('deleted', $record, __('Deleted :name', ['name' => $this->title]).': '.$this->labelFor($record));
+        $model = $this->findRecord($record);
+        ActivityLog::record('deleted', $model, __('Deleted :name', ['name' => __($this->title)]).': '.$this->labelFor($model));
+        $model->delete();
 
-        $record->delete();
+        return back()->with('success', __(':name has been moved to the recycle bin.', ['name' => __($this->title)]));
+    }
 
-        return back()->with('success', __(':name has been moved to the recycle bin.', ['name' => $this->title]));
+    protected function findRecord(string $record): Model
+    {
+        /** @var Model $model */
+        $model = $this->model::query()->with($this->with)->findOrFail($record);
+
+        return $model;
     }
 
     /** @return array<string, mixed> */
@@ -205,12 +215,8 @@ abstract class ResourceController extends \App\Http\Controllers\Controller
                 continue;
             }
 
-            if (($field['translatable'] ?? false) === true) {
-                continue;
-            }
-
             $rules[$field['name']] = $field['rules'] ?? (($field['required'] ?? false) ? ['required'] : ['nullable']);
-            $attributes[$field['name']] = $field['label'];
+            $attributes[$field['name']] = __($field['label']);
         }
 
         $validator = validator($request->all(), $rules, [], $attributes);
@@ -225,10 +231,6 @@ abstract class ResourceController extends \App\Http\Controllers\Controller
             $name = $field['name'];
             $type = $field['type'] ?? 'text';
 
-            if (($field['translatable'] ?? false) === true) {
-                continue;
-            }
-
             if ($type === 'file') {
                 if (request()->hasFile($name)) {
                     $record->{$name} = request()->file($name)->store($field['directory'] ?? 'uploads', 'public');
@@ -237,11 +239,13 @@ abstract class ResourceController extends \App\Http\Controllers\Controller
                 continue;
             }
 
-            if (! array_key_exists($name, $data)) {
-                if ($type === 'checkbox') {
-                    $record->{$name} = false;
-                }
+            if ($type === 'checkbox' && ! array_key_exists($name, $data)) {
+                $record->{$name} = false;
 
+                continue;
+            }
+
+            if (! array_key_exists($name, $data)) {
                 continue;
             }
 
@@ -259,7 +263,11 @@ abstract class ResourceController extends \App\Http\Controllers\Controller
                 $value = bcrypt($value);
             }
 
-            $record->{$name} = is_string($value) ? trim($value) === '' ? null : $value : $value;
+            if ($type === 'number' && $value !== null && $value !== '') {
+                $value = $value + 0;
+            }
+
+            $record->{$name} = is_string($value) ? (trim($value) === '' ? null : $value) : $value;
         }
     }
 
