@@ -43,7 +43,7 @@ return [
     ],
 
     'panel_prefix' => [
-        'super_admin' => 'super-admin',
+        'super_admin' => 'super',
         'institute_admin' => 'admin',
         'teacher' => 'teacher',
         'student' => 'student',
